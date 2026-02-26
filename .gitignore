@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# VS Code
+.vscode/
+
+# Runtime/project local data
+log.txt
+resume_state.json
+downloads/
+config.json
+*.local.json
+
+# Keep shareable template JSON tracked
+!config.audit-template.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env files
+.env
+.env.*
