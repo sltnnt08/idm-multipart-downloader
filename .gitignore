@@ -39,6 +39,7 @@ config.json
 # OS
 .DS_Store
 Thumbs.db
+IDMan.exe.lnk
 
 # Local env files
 .env
