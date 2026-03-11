@@ -22,33 +22,38 @@ Downloader massal berbasis CLI untuk mengirim banyak link ke IDM dari satu file 
 - Python 3.11+
 - Internet Download Manager (IDM)
 
-Install dependencies:
+Create and use a virtual environment:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+If `.venv` already exists in this repo, just activate it before running the app.
+
+Install dependencies without activating the shell session:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ### Quick start (recommended)
 
 0. Copy `config.template.json` to `config.json`.
-1. Put all links/IDs into a text file, e.g. `daftar.txt` (one per line).
-2. Import into config:
-
-```powershell
-python paste_to_config.py --config config.json --file daftar.txt
-```
-
+1. Put all links into `download.txt` (one link per line, mixed domains are allowed).
+2. (Optional) Set `input_file` in config if you want to use another text file.
 3. (Optional) Set `id_url_template` if your input contains raw IDs.
 4. Run safe check first:
 
 ```powershell
-python main.py --config config.json --dry-run
+.\.venv\Scripts\python.exe main.py --config config.json --dry-run
 ```
 
 5. If output looks good, run real queue:
 
 ```powershell
-python main.py --config config.json
+.\.venv\Scripts\python.exe main.py --config config.json
 ```
 
 ### Input modes (priority)
@@ -57,8 +62,9 @@ The app reads inputs in this order:
 
 1. `paste_input`
 2. `input_urls`
-3. `input_ids`
-4. Multipart generator (`base_url` + `filename_pattern`)
+3. `input_file` / `download.txt`
+4. `input_ids`
+5. Multipart generator (`base_url` + `filename_pattern`)
 
 If `paste_input` is filled, lower-priority modes are ignored.
 
@@ -68,6 +74,7 @@ If `paste_input` is filled, lower-priority modes are ignored.
 - `idm_path`: IDM executable path (empty = auto-detect)
 - `queue_only`: use IDM queue mode (`/a`)
 - `auto_start_queue`: start IDM queue after enqueue
+- `worker_count`: number of concurrent workers for validation and IDM queue loading
 - `resolve_download_button_links`: parse direct link from `DOWNLOAD` button pages
 - `selenium_fallback_enabled`: use Selenium click fallback when HTML parsing fails
 - `selenium_headless`: run Selenium with hidden browser
@@ -95,13 +102,14 @@ Interactive prompt choices:
 ### Useful commands
 
 ```powershell
-python main.py --config config.json
-python main.py --config config.json --dry-run
-python main.py --config config.json --no-resume
+.\.venv\Scripts\python.exe main.py --config config.json
+.\.venv\Scripts\python.exe main.py --config config.json --dry-run
+.\.venv\Scripts\python.exe main.py --config config.json --no-resume
 ```
 
 ### Troubleshooting
 
+- `download.txt` is not read → ensure `input_file` points to the right file or keep the default `./download.txt` next to `config.json`.
 - `IDM executable not found` → set `idm_path` correctly or leave empty for auto-detect.
 - Queue empty after run → check `resume_mode`, `existing_file_action`, and `log.txt` diagnostics.
 - URL requires button click → keep `resolve_download_button_links=true`; optionally enable `selenium_fallback_enabled=true`.
@@ -125,33 +133,38 @@ python main.py --config config.json --no-resume
 - Python 3.11+
 - Internet Download Manager (IDM)
 
-Install dependency:
+Buat dan gunakan virtual environment:
 
 ```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
+
+Kalau `.venv` di repo ini sudah ada, cukup aktifkan dulu sebelum menjalankan program.
+
+Install dependency tanpa aktivasi shell:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ### Quick start (disarankan)
 
-0. Copy `config.audit-template.json` menjadi `config.json`.
-1. Simpan semua link/ID ke file teks, misalnya `daftar.txt` (1 baris 1 item).
-2. Import ke config:
-
-```powershell
-python paste_to_config.py --config config.json --file daftar.txt
-```
-
+0. Copy `config.template.json` menjadi `config.json`.
+1. Simpan semua link ke `download.txt` (1 baris 1 link, domain bisa campur).
+2. (Opsional) Ubah `input_file` jika ingin pakai nama file lain.
 3. (Opsional) Isi `id_url_template` jika input berisi ID mentah.
 4. Jalankan cek aman dulu:
 
 ```powershell
-python main.py --config config.json --dry-run
+.\.venv\Scripts\python.exe main.py --config config.json --dry-run
 ```
 
 5. Kalau output sesuai, jalankan queue real:
 
 ```powershell
-python main.py --config config.json
+.\.venv\Scripts\python.exe main.py --config config.json
 ```
 
 ### Mode input (prioritas)
@@ -160,8 +173,9 @@ Sistem membaca input dengan urutan:
 
 1. `paste_input`
 2. `input_urls`
-3. `input_ids`
-4. Generator multipart (`base_url` + `filename_pattern`)
+3. `input_file` / `download.txt`
+4. `input_ids`
+5. Generator multipart (`base_url` + `filename_pattern`)
 
 Kalau `paste_input` terisi, mode di bawahnya diabaikan.
 
@@ -171,6 +185,7 @@ Kalau `paste_input` terisi, mode di bawahnya diabaikan.
 - `idm_path`: path executable IDM (kosong = auto-detect)
 - `queue_only`: kirim ke antrean dulu (`/a`)
 - `auto_start_queue`: jalankan antrean IDM setelah enqueue
+- `worker_count`: jumlah worker paralel untuk validasi link dan pengiriman ke antrean IDM
 - `resolve_download_button_links`: parsing direct link dari halaman tombol `DOWNLOAD`
 - `selenium_fallback_enabled`: fallback klik Selenium jika parsing HTML gagal
 - `selenium_headless`: Selenium jalan tanpa UI browser
@@ -198,13 +213,14 @@ Pilihan saat prompt:
 ### Command yang sering dipakai
 
 ```powershell
-python main.py --config config.json
-python main.py --config config.json --dry-run
-python main.py --config config.json --no-resume
+.\.venv\Scripts\python.exe main.py --config config.json
+.\.venv\Scripts\python.exe main.py --config config.json --dry-run
+.\.venv\Scripts\python.exe main.py --config config.json --no-resume
 ```
 
 ### Troubleshooting
 
+- `download.txt` tidak terbaca → pastikan `input_file` mengarah ke file yang benar atau biarkan default `./download.txt` di folder yang sama dengan `config.json`.
 - `IDM executable not found` → isi `idm_path` dengan benar atau kosongkan untuk auto-detect.
 - Queue kosong setelah run → cek `resume_mode`, `existing_file_action`, dan diagnostik di `log.txt`.
 - URL perlu klik tombol dulu → pastikan `resolve_download_button_links=true`; opsional aktifkan `selenium_fallback_enabled=true`.
@@ -219,4 +235,4 @@ python main.py --config config.json --no-resume
 - `download_link_resolver.py` — landing-page/direct-link resolver (+ Selenium fallback)
 - `validator.py` — URL safety validation
 - `idm_controller.py` — IDM command integration
-- `paste_to_config.py` — helper import input to config
+- `download.txt` — default source file for mixed direct links

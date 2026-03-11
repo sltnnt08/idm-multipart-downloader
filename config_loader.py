@@ -46,6 +46,7 @@ class AppConfig:
     head_fallback_get: bool
     log_max_mb: int
     input_urls: list[str]
+    input_file: str
     validate_resume_with_idm: bool
     idm_state_dir: str
     require_rar_extension: bool
@@ -54,6 +55,7 @@ class AppConfig:
     selenium_fallback_enabled: bool
     selenium_headless: bool
     existing_file_action: str
+    worker_count: int
 
     @property
     def min_size_bytes(self) -> int:
@@ -104,11 +106,11 @@ def _create_default_config(config_path: Path) -> None:
         "min_size_mb": 5,
         "max_part": 200,
         "download_path": "./downloads",
-        "auto_detect": True,
         "idm_path": "",
         "idm_shortcut_path": "./IDMan.exe.lnk",
         "queue_only": True,
         "auto_start_queue": True,
+        "worker_count": 8,
         "request_timeout": 10,
         "retry_count": 2,
         "retry_backoff_seconds": 1.5,
@@ -130,6 +132,7 @@ def _create_default_config(config_path: Path) -> None:
         "idm_state_dir": "%APPDATA%/IDM/DwnlData",
         "source_url": "",
         "paste_input": "",
+        "input_file": "./download.txt",
         "input_urls": [],
         "input_ids": [],
         "id_url_template": "https://example.com/{id}",
@@ -167,6 +170,23 @@ def _normalize_input_urls(value: Any) -> list[str]:
         return urls
 
     raise ValueError("input_urls must be a list of URLs or multiline string")
+
+
+def _read_input_file(file_path: Path) -> list[str]:
+    if not file_path.exists():
+        raise FileNotFoundError(f"Input file not found: {file_path}")
+
+    raw = file_path.read_text(encoding="utf-8")
+    items: list[str] = []
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        items.extend(chunk for chunk in re.split(r"[\s,;]+", stripped) if chunk)
+
+    return items
 
 
 def _normalize_input_ids(value: Any) -> list[str]:
@@ -310,6 +330,8 @@ def _validate_config_values(config: AppConfig) -> None:
         raise ValueError("retry_backoff_seconds must be >= 0")
     if config.log_max_mb < 1:
         raise ValueError("log_max_mb must be >= 1")
+    if config.worker_count < 1:
+        raise ValueError("worker_count must be >= 1")
     if config.end_index is None and not config.auto_detect_parts:
         raise ValueError(
             "When end_index is null, auto_detect_parts must be true to avoid ambiguous range."
@@ -332,9 +354,17 @@ def load_config(config_path: str) -> AppConfig:
     input_ids = _normalize_input_ids(raw.get("input_ids"))
     id_url_template = str(raw.get("id_url_template", "")).strip()
     paste_tokens = _normalize_paste_input(raw.get("paste_input", raw.get("paste")))
+    raw_input_file = str(raw.get("input_file", "")).strip()
+
+    if not raw_input_file and not input_urls and not input_ids and not paste_tokens:
+        default_input_file = base_dir / "download.txt"
+        if default_input_file.exists():
+            raw_input_file = "./download.txt"
 
     if paste_tokens:
         input_urls = _compose_urls_from_paste_tokens(paste_tokens, id_url_template)
+    elif raw_input_file and not input_urls and not input_ids:
+        input_urls = _read_input_file((base_dir / os.path.expandvars(raw_input_file)).expanduser())
     elif input_ids:
         input_urls = _compose_urls_from_ids(input_ids, id_url_template)
 
@@ -385,6 +415,7 @@ def load_config(config_path: str) -> AppConfig:
         ),
         log_max_mb=int(raw.get("log_max_mb", 10)),
         input_urls=input_urls,
+        input_file=_resolve_path(base_dir, raw_input_file) if raw_input_file else "",
         validate_resume_with_idm=_to_bool(
             raw.get("validate_resume_with_idm", True),
             "validate_resume_with_idm",
@@ -414,6 +445,7 @@ def load_config(config_path: str) -> AppConfig:
             "selenium_headless",
         ),
         existing_file_action=str(raw.get("existing_file_action", "ask")).strip().lower(),
+        worker_count=int(raw.get("worker_count", 8)),
     )
 
     if not config.input_urls:

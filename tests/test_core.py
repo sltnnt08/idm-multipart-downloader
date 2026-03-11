@@ -51,6 +51,17 @@ class _FakeTinyProbeSession:
         return _FakeResponse(206, {"Content-Range": "bytes 0-0/1", "Content-Length": "1"})
 
 
+class _Fake429ThenOkSession:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def head(self, *_args, **_kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            return _FakeResponse(429, {"Retry-After": "0"})
+        return _FakeResponse(200, {"Content-Length": "2048", "Content-Type": "application/octet-stream"})
+
+
 class _FakeHtmlSession:
     @staticmethod
     def head(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
@@ -91,6 +102,7 @@ class CoreTests(unittest.TestCase):
             "idm_shortcut_path": "IDMan.exe.lnk",
             "queue_only": True,
             "auto_start_queue": True,
+            "worker_count": 4,
             "request_timeout": 10,
             "retry_count": 1,
             "retry_backoff_seconds": 1,
@@ -108,6 +120,7 @@ class CoreTests(unittest.TestCase):
             "selenium_fallback_enabled": False,
             "selenium_headless": True,
             "existing_file_action": "ask",
+            "input_file": "",
         }
 
     def test_config_resolves_relative_paths(self) -> None:
@@ -187,6 +200,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result.status_code, 206)
         self.assertEqual(result.size_bytes, 0)
         self.assertIn("File too small", result.reason)
+
+    def test_validator_retries_after_http_429(self) -> None:
+        validator = URLValidator(
+            timeout=5,
+            min_size_bytes=1024,
+            verify_ssl=False,
+            retry_count=1,
+            retry_backoff_seconds=0,
+            head_fallback_get=False,
+            require_rar_extension=False,
+            reject_html_content=True,
+        )
+        fake_session = _Fake429ThenOkSession()
+        validator.session = fake_session  # type: ignore[assignment]
+
+        result = validator.validate("https://example.com/archive.part001.rar")
+
+        self.assertTrue(result.is_valid)
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(fake_session.calls, 2)
 
     def test_validator_rejects_html_landing_page(self) -> None:
         validator = URLValidator(
@@ -338,6 +371,28 @@ class CoreTests(unittest.TestCase):
 
             config = load_config(str(config_file))
             self.assertEqual(config.input_urls, ["https://a.test/1", "https://b.test/2"])
+
+    def test_download_txt_is_loaded_when_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_file = root / "config.json"
+            download_file = root / "download.txt"
+            payload = self._base_config()
+            payload["base_url"] = ""
+            payload["filename_pattern"] = ""
+            config_file.write_text(json.dumps(payload), encoding="utf-8")
+            download_file.write_text(
+                "# komentar\nhttps://host.test/a\nhttps://host.test/b https://host.test/c\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(str(config_file))
+
+            self.assertEqual(
+                config.input_urls,
+                ["https://host.test/a", "https://host.test/b", "https://host.test/c"],
+            )
+            self.assertTrue(config.input_file.endswith("download.txt"))
 
     def test_input_ids_are_converted_to_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

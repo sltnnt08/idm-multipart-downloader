@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
 import os
@@ -107,56 +108,105 @@ def _filename_from_url(url: str, index: int) -> str:
     return f"file_{index}"
 
 
+def _create_validator(config: AppConfig) -> URLValidator:
+    return URLValidator(
+        timeout=config.request_timeout,
+        min_size_bytes=config.min_size_bytes,
+        verify_ssl=config.verify_ssl,
+        retry_count=config.retry_count,
+        retry_backoff_seconds=config.retry_backoff_seconds,
+        head_fallback_get=config.head_fallback_get,
+        require_rar_extension=config.require_rar_extension,
+        reject_html_content=config.reject_html_content,
+    )
+
+
+def _resolve_and_validate_input_url(
+    config: AppConfig,
+    index: int,
+    url: str,
+    validator: URLValidator | None = None,
+) -> FilePart | None:
+    active_validator = validator or _create_validator(config)
+    resolved = resolve_download_button_link(
+        url=url,
+        timeout=config.request_timeout,
+        verify_ssl=config.verify_ssl,
+        enabled=config.resolve_download_button_links,
+        selenium_fallback_enabled=config.selenium_fallback_enabled,
+        selenium_headless=config.selenium_headless,
+    )
+    target_url = resolved.resolved_url
+
+    if resolved.was_resolved:
+        logging.info("[RESOLVED] %s -> %s", url, target_url)
+    elif config.resolve_download_button_links:
+        logging.info("[RESOLVE SKIP] %s | %s", url, resolved.reason)
+
+    result = active_validator.validate(target_url)
+    size_bytes = result.size_bytes
+    if not result.is_valid:
+        allow_unknown_size = (
+            result.status_code in {200, 206}
+            and result.size_bytes == 0
+            and result.reason.startswith("File too small")
+        )
+        if allow_unknown_size:
+            logging.warning(
+                "[INPUT URL SIZE UNKNOWN] %s | Proceeding with IDM queue (size not provided by server)",
+                target_url,
+            )
+            size_bytes = 0
+        else:
+            logging.warning("[INPUT URL INVALID] %s | %s", target_url, result.reason)
+            return None
+
+    return FilePart(
+        index=index,
+        url=target_url,
+        filename=_filename_from_url(url, index=index),
+        size_bytes=size_bytes,
+        http_status=getattr(result, "status_code", None),
+    )
+
+
 def build_report_from_input_urls(config: AppConfig, validator: URLValidator) -> GenerationReport:
-    parts: list[FilePart] = []
-    checked = 0
+    checked = len(config.input_urls)
+    if checked == 0:
+        return GenerationReport(parts=[], examined_count=0, stop_reason="input_urls processed", stop_index=None)
 
-    for index, url in enumerate(config.input_urls, start=1):
-        checked += 1
-        resolved = resolve_download_button_link(
-            url=url,
-            timeout=config.request_timeout,
-            verify_ssl=config.verify_ssl,
-            enabled=config.resolve_download_button_links,
-            selenium_fallback_enabled=config.selenium_fallback_enabled,
-            selenium_headless=config.selenium_headless,
-        )
-        target_url = resolved.resolved_url
+    worker_limit = getattr(config, "worker_count", 1)
+    if not isinstance(validator, URLValidator):
+        worker_limit = 1
 
-        if resolved.was_resolved:
-            logging.info("[RESOLVED] %s -> %s", url, target_url)
-        elif config.resolve_download_button_links and "/dl/" not in urlparse(url).path:
-            logging.info("[RESOLVE SKIP] %s | %s", url, resolved.reason)
+    max_workers = min(worker_limit, checked)
+    ordered_parts: dict[int, FilePart] = {}
 
-        result = validator.validate(target_url)
-        size_bytes = result.size_bytes
-        if not result.is_valid:
-            allow_unknown_size = (
-                result.status_code in {200, 206}
-                and result.size_bytes == 0
-                and result.reason.startswith("File too small")
-            )
-            if allow_unknown_size:
-                logging.warning(
-                    "[INPUT URL SIZE UNKNOWN] %s | Proceeding with IDM queue (size not provided by server)",
-                    target_url,
-                )
-                size_bytes = 0
-            else:
-                logging.warning("[INPUT URL INVALID] %s | %s", target_url, result.reason)
-                continue
-
-        parts.append(
-            FilePart(
+    if max_workers == 1:
+        for index, url in enumerate(config.input_urls, start=1):
+            part = _resolve_and_validate_input_url(
+                config=config,
                 index=index,
-                url=target_url,
-                filename=_filename_from_url(url, index=index),
-                size_bytes=size_bytes,
+                url=url,
+                validator=validator,
             )
-        )
+            if part is not None:
+                ordered_parts[index] = part
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="input") as executor:
+            futures = {
+                executor.submit(_resolve_and_validate_input_url, config, index, url): index
+                for index, url in enumerate(config.input_urls, start=1)
+            }
+            for future in as_completed(futures):
+                index = futures[future]
+                part = future.result()
+                if part is not None:
+                    ordered_parts[index] = part
 
-    stop_reason = "input_urls processed"
-    stop_index = checked if checked > 0 else None
+    parts = [ordered_parts[index] for index in sorted(ordered_parts)]
+    stop_reason = f"input_urls processed ({max_workers} worker(s))"
+    stop_index = checked
 
     return GenerationReport(
         parts=parts,
@@ -214,14 +264,13 @@ def _should_skip_part(part: FilePart, seen_urls: set[str], resume_urls: set[str]
     return False
 
 
-def _queue_or_dry_run(part: FilePart, controller: IDMController, dry_run: bool, updated_resume: set[str]) -> bool:
+def _queue_or_dry_run(part: FilePart, controller: IDMController, dry_run: bool) -> bool:
     if dry_run:
         logging.info("[DRY-RUN] Would queue: %s", part.url)
         return True
 
     try:
         controller.queue_download(part)
-        updated_resume.add(part.url)
         logging.info("[QUEUED] %s", part.url)
         return True
     except subprocess.CalledProcessError as exc:
@@ -322,6 +371,7 @@ def queue_parts(
     seen_urls: set[str] = set()
     interrupted = False
     sticky_existing_action: str | None = None
+    queue_candidates: list[FilePart] = []
 
     try:
         for part in parts:
@@ -339,13 +389,30 @@ def queue_parts(
                 skipped_count += 1
                 continue
 
-            if _queue_or_dry_run(
-                part=part,
-                controller=controller,
-                dry_run=dry_run,
-                updated_resume=updated_resume,
-            ):
-                queued_count += 1
+            queue_candidates.append(part)
+
+        worker_limit = getattr(controller.config, "worker_count", 1)
+        max_workers = min(worker_limit, len(queue_candidates)) if queue_candidates else 0
+        if max_workers <= 1:
+            for part in queue_candidates:
+                if _queue_or_dry_run(
+                    part=part,
+                    controller=controller,
+                    dry_run=dry_run,
+                ):
+                    queued_count += 1
+                    updated_resume.add(part.url)
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="idm") as executor:
+                futures = {
+                    executor.submit(_queue_or_dry_run, part, controller, dry_run): part
+                    for part in queue_candidates
+                }
+                for future in as_completed(futures):
+                    part = futures[future]
+                    if future.result():
+                        queued_count += 1
+                        updated_resume.add(part.url)
     except KeyboardInterrupt:
         interrupted = True
         logging.warning("Interrupted by user while queueing. Saving partial progress.")
@@ -363,6 +430,19 @@ def _queue_status_label(dry_run: bool, queued_count: int, skipped_count: int) ->
     return "NOT QUEUED"
 
 
+def _http_status_summary(parts: list[FilePart]) -> str:
+    if not parts:
+        return "-"
+
+    counts: dict[str, int] = {}
+    for part in parts:
+        key = str(part.http_status) if part.http_status is not None else "UNKNOWN"
+        counts[key] = counts.get(key, 0) + 1
+
+    ordered = sorted(counts.items(), key=lambda item: item[0])
+    return ", ".join(f"{code}:{count}" for code, count in ordered)
+
+
 def print_summary(
     report: GenerationReport,
     queued_count: int,
@@ -371,6 +451,7 @@ def print_summary(
 ) -> None:
     total_size = sum(part.size_bytes for part in report.parts)
     status = _queue_status_label(dry_run=dry_run, queued_count=queued_count, skipped_count=skipped_count)
+    http_status = _http_status_summary(report.parts)
 
     print("\n===== SUMMARY =====")
     print(f"Total files detected : {len(report.parts)}")
@@ -380,7 +461,7 @@ def print_summary(
     print(f"Skipped (resume/file): {skipped_count}")
     print(f"Stop reason          : {report.stop_reason}")
     print(f"Stop index           : {report.stop_index if report.stop_index is not None else '-'}")
-    print(f"Queue status         : {status}")
+    print(f"Queue status         : {status} | HTTP {http_status}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -407,16 +488,7 @@ def run(config: AppConfig, dry_run: bool, resume_mode: bool) -> None:
     if not dry_run:
         ensure_download_path(config.download_path)
 
-    validator = URLValidator(
-        timeout=config.request_timeout,
-        min_size_bytes=config.min_size_bytes,
-        verify_ssl=config.verify_ssl,
-        retry_count=config.retry_count,
-        retry_backoff_seconds=config.retry_backoff_seconds,
-        head_fallback_get=config.head_fallback_get,
-        require_rar_extension=config.require_rar_extension,
-        reject_html_content=config.reject_html_content,
-    )
+    validator = _create_validator(config)
     report = _generate_report(config, validator)
     parts = report.parts
 

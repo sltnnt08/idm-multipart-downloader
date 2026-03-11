@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import requests
+
+
+_RATE_LIMIT_LOCK = threading.Lock()
+_RATE_LIMIT_UNTIL = 0.0
+
+
+class _RateLimitedError(Exception):
+    def __init__(self, retry_after_seconds: float | None) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("HTTP 429")
 
 
 @dataclass(frozen=True)
@@ -38,6 +51,51 @@ class URLValidator:
         self.require_rar_extension = require_rar_extension
         self.reject_html_content = reject_html_content
         self.session = requests.Session()
+
+    @staticmethod
+    def _parse_retry_after_seconds(retry_after_value: str | None) -> float | None:
+        if not retry_after_value:
+            return None
+
+        value = retry_after_value.strip()
+        if not value:
+            return None
+
+        try:
+            seconds = float(value)
+            return max(0.0, seconds)
+        except ValueError:
+            pass
+
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError):
+            return None
+
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+        now = datetime.now(timezone.utc)
+        delta = (retry_at - now).total_seconds()
+        return max(0.0, delta)
+
+    @staticmethod
+    def _apply_global_rate_limit_pause(seconds: float) -> None:
+        global _RATE_LIMIT_UNTIL
+        if seconds <= 0:
+            return
+
+        target = time.time() + seconds
+        with _RATE_LIMIT_LOCK:
+            _RATE_LIMIT_UNTIL = max(_RATE_LIMIT_UNTIL, target)
+
+    @staticmethod
+    def _wait_if_rate_limited() -> None:
+        with _RATE_LIMIT_LOCK:
+            wait_seconds = _RATE_LIMIT_UNTIL - time.time()
+
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
 
     @staticmethod
     def _is_valid_url(url: str) -> bool:
@@ -141,12 +199,18 @@ class URLValidator:
         return ValidationResult(True, status_code, size_bytes, "OK")
 
     def _request_head(self, url: str) -> ValidationResult:
+        self._wait_if_rate_limited()
         response = self.session.head(
             url,
             allow_redirects=True,
             timeout=self.timeout,
             verify=self.verify_ssl,
         )
+
+        if response.status_code == 429:
+            retry_after = self._parse_retry_after_seconds(response.headers.get("Retry-After"))
+            raise _RateLimitedError(retry_after)
+
         size_bytes = self._extract_size_from_headers(response.headers)
 
         if self.head_fallback_get and size_bytes == 0:
@@ -155,6 +219,7 @@ class URLValidator:
         return self._validate_response(url, response.status_code, size_bytes, response.headers)
 
     def _request_get_fallback(self, url: str) -> ValidationResult:
+        self._wait_if_rate_limited()
         response = self.session.get(
             url,
             allow_redirects=True,
@@ -163,6 +228,11 @@ class URLValidator:
             stream=True,
             headers={"Range": "bytes=0-0"},
         )
+
+        if response.status_code == 429:
+            retry_after = self._parse_retry_after_seconds(response.headers.get("Retry-After"))
+            raise _RateLimitedError(retry_after)
+
         size_bytes = self._extract_size_from_headers(response.headers)
         if size_bytes <= 1:
             size_bytes = 0
@@ -177,6 +247,22 @@ class URLValidator:
         for attempt in range(1, attempts + 1):
             try:
                 return self._request_head(url)
+            except _RateLimitedError as exc:
+                retry_after = exc.retry_after_seconds
+                if retry_after is None:
+                    retry_after = max(5.0, self.retry_backoff_seconds * (2 ** (attempt - 1)))
+
+                self._apply_global_rate_limit_pause(retry_after)
+                logging.warning(
+                    "HTTP 429 for %s. Pausing %.1f seconds before retry (attempt %s/%s).",
+                    url,
+                    retry_after,
+                    attempt,
+                    attempts,
+                )
+
+                if attempt == attempts:
+                    return ValidationResult(False, 429, 0, "HTTP 429 (rate limited)")
             except requests.Timeout:
                 if attempt == attempts:
                     return ValidationResult(False, None, 0, "Timeout")

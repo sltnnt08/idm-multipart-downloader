@@ -32,9 +32,8 @@ resume_state.json
 downloads/
 config.json
 *.local.json
-
-# Keep shareable template JSON tracked
-!config.audit-template.json
+*.log
+*.tmp
 
 # OS
 .DS_Store

@@ -14,6 +14,7 @@ class FilePart:
     url: str
     filename: str
     size_bytes: int
+    http_status: int | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class URLGenerator:
                     url=url,
                     filename=self._extract_filename(url, index),
                     size_bytes=result.size_bytes,
+                    http_status=getattr(result, "status_code", None),
                 )
             )
 
